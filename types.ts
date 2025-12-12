@@ -26,4 +26,6 @@ export interface ParticleUniforms {
   uColorB: { value: Vector3 };
   uMix: { value: number }; // For template transition
   uPixelRatio: { value: number };
+  uShockwaveTime: { value: number }; // Time since snap (0 = inactive)
+  uShockwavePos: { value: Vector3 }; // World position of snap
 }

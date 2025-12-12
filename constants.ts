@@ -18,6 +18,11 @@ export const THEMES = [
     colorA: new Vector3(0.0, 1.0, 0.4), // Green
     colorB: new Vector3(0.0, 0.3, 0.1), // Dark Green
   },
+  {
+    name: "Amethyst",
+    colorA: new Vector3(0.4, 0.1, 0.9), // Purple
+    colorB: new Vector3(0.95, 0.7, 0.85), // Mauve
+  },
 ];
 
 export const VERTEX_SHADER = `
@@ -27,12 +32,17 @@ export const VERTEX_SHADER = `
   uniform float uMix;
   uniform float uPixelRatio;
 
+  // Shockwave Uniforms
+  uniform float uShockwaveTime;
+  uniform vec3 uShockwavePos;
+
   attribute vec3 aPositionA;
   attribute vec3 aPositionB;
   attribute float aRandom;
   attribute float aSize;
 
   varying float vDist;
+  varying float vShockwave;
 
   // Simplex noise function
   vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
@@ -88,25 +98,19 @@ export const VERTEX_SHADER = `
   }
 
   void main() {
-    // --- Transition Logic ---
-    // SmoothMix: S-curve interpolation for position
     float smoothMix = smoothstep(0.0, 1.0, uMix);
     vec3 targetPos = mix(aPositionA, aPositionB, smoothMix);
 
-    // Transition Intensity: Bell curve peaking at uMix = 0.5
     float transIntensity = sin(uMix * 3.14159);
 
-    // Scramble Effect: Particles fly randomly outwards during transition
     vec3 noiseInput = vec3(aRandom * 13.0, aRandom * 47.0 + uTime * 2.0, aRandom * 71.0);
     vec3 scrambleDir = vec3(
         snoise(noiseInput),
         snoise(noiseInput + 100.0),
         snoise(noiseInput + 200.0)
     );
-    // Apply scramble
     targetPos += scrambleDir * transIntensity * 8.0;
 
-    // --- Idle Drift ---
     float noise = snoise(targetPos * 0.5 + uTime * 0.2);
     vec3 drift = vec3(
       sin(uTime * 0.5 + aRandom * 6.28),
@@ -116,30 +120,37 @@ export const VERTEX_SHADER = `
 
     vec3 newPos = targetPos + drift;
 
-    // --- Interactive Force ---
-    // Hand attraction/repulsion
     float d = distance(newPos, uHandPos);
     
-    // Pinch Strength: 0 = floaty, 1 = intense attraction
     float attraction = smoothstep(5.0, 0.0, d) * uPinch * 6.0;
-    
-    // If not pinching, slight repulsion from finger
     float repulsion = smoothstep(1.5, 0.0, d) * (1.0 - uPinch) * 1.5;
 
-    // Apply forces
     vec3 dir = normalize(uHandPos - newPos);
     newPos += dir * attraction;
     newPos -= dir * repulsion;
 
+    float shockRadius = uShockwaveTime * 15.0; 
+    float shockWidth = 2.0;
+    
+    float distToShock = distance(targetPos, uShockwavePos);
+    
+    float shockIntensity = smoothstep(shockRadius, shockRadius - shockWidth, distToShock) 
+                         * smoothstep(shockRadius - shockWidth * 2.0, shockRadius - shockWidth, distToShock);
+    
+    shockIntensity *= (0.8 + 0.2 * snoise(newPos * 2.0));
+    
+    vec3 shockDir = normalize(targetPos - uShockwavePos);
+    newPos += shockDir * shockIntensity * 3.0;
+    
+    vShockwave = shockIntensity;
+
     vec4 mvPosition = modelViewMatrix * vec4(newPos, 1.0);
     gl_Position = projectionMatrix * mvPosition;
 
-    // --- Size Attenuation ---
-    // Increase size during transition (flash effect)
-    float sizePulse = 1.0 + transIntensity * 1.5;
-    gl_PointSize = (aSize * 60.0 * uPixelRatio * sizePulse) / -mvPosition.z;
+    // INCREASED SIZE MULTIPLIER FROM 60.0 to 150.0 for better visibility
+    float sizePulse = 1.0 + transIntensity * 1.5 + shockIntensity * 2.0;
+    gl_PointSize = (aSize * 150.0 * uPixelRatio * sizePulse) / -mvPosition.z;
     
-    // Pass distance to fragment for coloring
     vDist = d;
   }
 `;
@@ -148,32 +159,29 @@ export const FRAGMENT_SHADER = `
   uniform vec3 uColorA;
   uniform vec3 uColorB;
   uniform float uPinch;
-  uniform float uMix; // Passed for color transition effects
+  uniform float uMix;
 
   varying float vDist;
+  varying float vShockwave;
 
   void main() {
-    // Circular particle
     vec2 coord = gl_PointCoord - vec2(0.5);
     float r = length(coord);
     if (r > 0.5) discard;
 
-    // Soft glow
     float glow = 1.0 - (r * 2.0);
     glow = pow(glow, 1.5);
 
-    // Color mixing based on distance to hand
-    // Closer to hand = hotter/brighter
     float mixFactor = smoothstep(4.0, 0.5, vDist);
     vec3 finalColor = mix(uColorA, uColorB, mixFactor);
 
-    // Boost brightness on pinch
     float brightness = 1.0 + uPinch * 2.0;
 
-    // Transition Flash: Whiten the color during shape change
     float transIntensity = sin(uMix * 3.14159);
     vec3 flashColor = vec3(1.0, 1.0, 1.0);
     finalColor = mix(finalColor * brightness, flashColor, transIntensity * 0.6);
+    
+    finalColor += vShockwave * vec3(0.8, 0.9, 1.0) * 2.0;
 
     gl_FragColor = vec4(finalColor, glow * 0.8);
   }

@@ -1,6 +1,6 @@
 import React, { useRef, useMemo, useEffect } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
-import { Points, ShaderMaterial, Vector3, BufferGeometry, Float32BufferAttribute } from 'three';
+import { Points, ShaderMaterial, Vector3, AdditiveBlending } from 'three';
 import { PARTICLE_COUNT, VERTEX_SHADER, FRAGMENT_SHADER, THEMES } from '../constants';
 import { ParticleTemplate, HandData } from '../types';
 
@@ -15,16 +15,22 @@ export const Particles: React.FC<ParticlesProps> = ({ handDataRef, template, the
   const materialRef = useRef<ShaderMaterial>(null);
   const { viewport } = useThree();
 
-  // Store transition state
   const transitionRef = useRef({
     startTime: 0,
-    duration: 1.2, // Slightly faster transition
+    duration: 1.2, 
     active: false,
     fromTemplate: 'sphere' as ParticleTemplate,
     toTemplate: 'sphere' as ParticleTemplate
   });
 
-  // Generate geometry data
+  const shockwaveRef = useRef({
+    active: false,
+    time: 0,
+    pos: new Vector3(0,0,0)
+  });
+  
+  const prevPinchRef = useRef(0);
+
   const { positionsMap, randoms, sizes } = useMemo(() => {
     const randoms = new Float32Array(PARTICLE_COUNT);
     const sizes = new Float32Array(PARTICLE_COUNT);
@@ -49,19 +55,17 @@ export const Particles: React.FC<ParticlesProps> = ({ handDataRef, template, the
       map.sphere[i3+2] = r * Math.cos(phi);
 
       // Heart
-      // parametric equations: x=16sin^3t, y=13cost-5cos2t-2cos3t-cos4t
-      // spread in 3D thickness
       const t = Math.random() * Math.PI * 2;
       const hScale = 0.25;
       map.heart[i3] = (16 * Math.pow(Math.sin(t), 3)) * hScale;
       map.heart[i3+1] = (13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t)) * hScale;
-      map.heart[i3+2] = (Math.random() - 0.5) * 2; // Thickness
+      map.heart[i3+2] = (Math.random() - 0.5) * 2; 
 
-      // Ring (Saturn)
+      // Ring
       const rRing = 5 + Math.random() * 2;
       const angle = Math.random() * Math.PI * 2;
       map.ring[i3] = rRing * Math.cos(angle);
-      map.ring[i3+1] = (Math.random() - 0.5) * 0.5; // Flat y
+      map.ring[i3+1] = (Math.random() - 0.5) * 0.5; 
       map.ring[i3+2] = rRing * Math.sin(angle);
 
       // Cube
@@ -74,17 +78,14 @@ export const Particles: React.FC<ParticlesProps> = ({ handDataRef, template, the
     return { positionsMap: map, randoms, sizes };
   }, []);
 
-  // Update Attributes when template changes
   useEffect(() => {
     if (!pointsRef.current) return;
     
-    // Start transition
     transitionRef.current.active = true;
     transitionRef.current.startTime = Date.now();
-    transitionRef.current.fromTemplate = transitionRef.current.toTemplate; // old 'to' is now 'from'
+    transitionRef.current.fromTemplate = transitionRef.current.toTemplate; 
     transitionRef.current.toTemplate = template;
 
-    // Update 'B' attribute to new target
     const geometry = pointsRef.current.geometry;
     if (geometry && geometry.attributes.aPositionB) {
         (geometry.attributes.aPositionB as any).array.set(positionsMap[template]);
@@ -92,7 +93,6 @@ export const Particles: React.FC<ParticlesProps> = ({ handDataRef, template, the
     }
   }, [template, positionsMap]);
 
-  // Uniforms Ref
   const uniforms = useMemo(() => ({
     uTime: { value: 0 },
     uHandPos: { value: new Vector3(0, 0, 0) },
@@ -100,57 +100,65 @@ export const Particles: React.FC<ParticlesProps> = ({ handDataRef, template, the
     uColorA: { value: THEMES[0].colorA.clone() },
     uColorB: { value: THEMES[0].colorB.clone() },
     uMix: { value: 0 },
-    uPixelRatio: { value: 1 } // Will update in useFrame
+    uPixelRatio: { value: 2.0 }, // Safe default
+    uShockwaveTime: { value: 0 },
+    uShockwavePos: { value: new Vector3(0, 0, 0) }
   }), []);
 
-  // Update Theme colors
   useEffect(() => {
     uniforms.uColorA.value.lerp(THEMES[themeIndex].colorA, 0.1);
     uniforms.uColorB.value.lerp(THEMES[themeIndex].colorB, 0.1);
   }, [themeIndex, uniforms]);
 
-  useFrame((state) => {
+  useFrame((state, delta) => {
     if (!materialRef.current || !pointsRef.current) return;
 
     const time = state.clock.getElapsedTime();
     const hand = handDataRef.current;
     
-    // Update Uniforms
     materialRef.current.uniforms.uTime.value = time;
-    materialRef.current.uniforms.uPixelRatio.value = viewport.dpr;
+    // Ensure pixel ratio is always positive
+    materialRef.current.uniforms.uPixelRatio.value = Math.max(1, viewport.dpr || window.devicePixelRatio || 2.0);
 
-    // Map Hand Coordinates (0..1) to World Coordinates
-    // Viewport width/height at z=0 is approximate usage here
     const wx = (hand.position.x - 0.5) * viewport.width;
     const wy = (hand.position.y - 0.5) * viewport.height;
-    // Map Z (depth) roughly. MediaPipe Z is relative.
     const wz = hand.position.z * 5; 
-
-    // Smooth hand position
     const targetHandPos = new Vector3(wx, wy, wz);
-    // If hand not present, move attractor far away
+    
     if (!hand.present) {
       targetHandPos.set(1000, 1000, 1000);
     }
-    
-    // Lerp current uniform value to target (smooth movement)
     materialRef.current.uniforms.uHandPos.value.lerp(targetHandPos, 0.1);
 
-    // Pinch strength
-    const targetPinch = hand.present ? hand.pinchStrength : 0;
-    materialRef.current.uniforms.uPinch.value += (targetPinch - materialRef.current.uniforms.uPinch.value) * 0.1;
+    const currentPinch = hand.present ? hand.pinchStrength : 0;
+    materialRef.current.uniforms.uPinch.value += (currentPinch - materialRef.current.uniforms.uPinch.value) * 0.1;
 
-    // Handle Transition
+    if (hand.present && prevPinchRef.current > 0.8 && currentPinch < 0.4) {
+      shockwaveRef.current.active = true;
+      shockwaveRef.current.time = 0;
+      shockwaveRef.current.pos.copy(materialRef.current.uniforms.uHandPos.value);
+    }
+    prevPinchRef.current = currentPinch;
+
+    if (shockwaveRef.current.active) {
+       shockwaveRef.current.time += delta * 1.5; 
+       if (shockwaveRef.current.time > 2.5) {
+         shockwaveRef.current.active = false;
+         shockwaveRef.current.time = 0;
+       }
+    }
+    
+    materialRef.current.uniforms.uShockwaveTime.value = shockwaveRef.current.time;
+    materialRef.current.uniforms.uShockwavePos.value.copy(shockwaveRef.current.pos);
+
     if (transitionRef.current.active) {
       const elapsed = (Date.now() - transitionRef.current.startTime) / 1000;
       const progress = Math.min(elapsed / transitionRef.current.duration, 1.0);
       
-      // Pass linear progress to shader for custom easing effects
       materialRef.current.uniforms.uMix.value = progress;
 
       if (progress >= 1.0) {
         transitionRef.current.active = false;
-        // Commit change: B becomes A
         const geometry = pointsRef.current.geometry;
         if (geometry && geometry.attributes.aPositionA) {
              (geometry.attributes.aPositionA as any).array.set(positionsMap[transitionRef.current.toTemplate]);
@@ -162,18 +170,18 @@ export const Particles: React.FC<ParticlesProps> = ({ handDataRef, template, the
   });
 
   return (
-    <points ref={pointsRef}>
+    <points ref={pointsRef} frustumCulled={false}>
       <bufferGeometry>
         <bufferAttribute
           attach="attributes-aPositionA"
           count={PARTICLE_COUNT}
-          array={positionsMap['sphere']} // Initial state
+          array={positionsMap['sphere']}
           itemSize={3}
         />
         <bufferAttribute
           attach="attributes-aPositionB"
           count={PARTICLE_COUNT}
-          array={positionsMap['sphere']} // Initial target
+          array={positionsMap['sphere']}
           itemSize={3}
         />
         <bufferAttribute
@@ -196,7 +204,7 @@ export const Particles: React.FC<ParticlesProps> = ({ handDataRef, template, the
         uniforms={uniforms}
         transparent
         depthWrite={false}
-        blending={2}
+        blending={AdditiveBlending}
       />
     </points>
   );
